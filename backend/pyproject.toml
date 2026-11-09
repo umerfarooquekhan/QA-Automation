@@ -7,7 +7,10 @@ name = "qa-agent"
 version = "0.1.0"
 description = "Autonomous AI QA test case generation agent (Phase 1)"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+  "pydantic>=2.7",
+  "pydantic-settings>=2.3",
+]
 
 [project.optional-dependencies]
 dev = [
