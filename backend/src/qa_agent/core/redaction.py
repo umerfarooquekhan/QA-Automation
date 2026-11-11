@@ -1,44 +1,119 @@
-"""Application settings.
+"""Redaction of secrets from text and data structures.
 
-Values come from environment variables prefixed with ``QA_`` (for example
-``QA_LOG_LEVEL``) or from a local ``.env`` file. The ``.env`` file is never committed.
+Goal: credentials, tokens and similar values must never reach logs, LLM prompts,
+stored observations or exported files. This module is the single place that knows
+how to find and mask them.
 
-Secrets such as passwords do NOT belong in settings. They go through the
-SecretStore, which is added in a later step.
+Two complementary mechanisms are used:
+
+1. Exact masking of *registered* secrets. When the application handles a real
+   credential (for example a password supplied by the user) it registers the value
+   here. Any later occurrence of that exact value is masked, however it got there.
+2. Pattern masking for common secret shapes: ``password=...``, authorization and
+   cookie headers, bearer tokens, JWTs, API keys, URL credentials and sensitive
+   query parameters.
+
+Pattern masking is a safety net, not a guarantee. It cannot recognise an arbitrary
+secret it has never seen, so real credentials must also be registered.
 """
 
-from functools import lru_cache
-from typing import Literal
+import re
+import threading
+from collections.abc import Mapping
+from typing import Any
 
-from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+REDACTED = "[REDACTED]"
+MIN_SECRET_LENGTH = 4
 
-AppEnv = Literal["development", "test", "production"]
-LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+_registry_lock = threading.Lock()
+_registered_secrets: set[str] = set()
 
 
-class Settings(BaseSettings):
-    """Typed, validated settings. Invalid values stop the application at startup."""
+def register_secret(value: str) -> None:
+    """Remember an exact secret value so it is masked everywhere from now on."""
+    if len(value) < MIN_SECRET_LENGTH:
+        # Masking very short strings would damage ordinary text, so refuse loudly
+        # instead of silently failing to protect the value.
+        raise ValueError(f"secret must be at least {MIN_SECRET_LENGTH} characters to mask safely")
+    with _registry_lock:
+        _registered_secrets.add(value)
 
-    model_config = SettingsConfigDict(
-        env_prefix="QA_",
-        # Works whether the program is started from the project root or from backend/.
-        env_file=(".env", "../.env"),
-        env_file_encoding="utf-8",
-        extra="ignore",
+
+def unregister_secret(value: str) -> None:
+    with _registry_lock:
+        _registered_secrets.discard(value)
+
+
+def clear_registered_secrets() -> None:
+    with _registry_lock:
+        _registered_secrets.clear()
+
+
+# Names that indicate a sensitive value. The match must be a whole word, so
+# "token" matches but "tokens_in", "max_tokens" and "token_count" do not.
+_KEY_NAMES = (
+    r"password|passwd|pwd|secret|token|api[_-]?key|authorization|cookie|"
+    r"credentials?|private[_-]?key|session[_-]?id"
+)
+
+# Authorization and cookie headers: mask everything to the end of the line.
+_HEADER_RE = re.compile(
+    r"(?P<key>(?<![A-Za-z0-9])(?:set-cookie|cookie|authorization)[\"']?\s*[:=]\s*[\"']?)"
+    r"(?P<value>[^\r\n]*)",
+    re.IGNORECASE,
+)
+_BEARER_RE = re.compile(r"\b(?P<key>bearer\s+)[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
+_KEY_VALUE_RE = re.compile(
+    rf"(?P<key>(?<![A-Za-z0-9])(?:{_KEY_NAMES})(?![A-Za-z0-9]))"
+    r"(?P<sep>[\"']?\s*[:=]\s*[\"']?)"
+    r"(?P<value>[^\s\"',;&]+)",
+    re.IGNORECASE,
+)
+_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}")
+_API_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{16,}")
+_URL_CREDENTIALS_RE = re.compile(
+    r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)(?P<user>[^/\s:@]+):(?P<password>[^/\s@]+)@"
+)
+_SENSITIVE_KEY_RE = re.compile(rf"(?:^|[_-])(?:{_KEY_NAMES})$", re.IGNORECASE)
+
+
+def redact_text(text: str) -> str:
+    """Return ``text`` with registered secrets and common secret patterns masked."""
+    with _registry_lock:
+        secrets = sorted(_registered_secrets, key=len, reverse=True)
+    for secret in secrets:
+        text = text.replace(secret, REDACTED)
+
+    text = _HEADER_RE.sub(lambda m: m.group("key") + REDACTED, text)
+    text = _BEARER_RE.sub(lambda m: m.group("key") + REDACTED, text)
+    text = _KEY_VALUE_RE.sub(lambda m: m.group("key") + m.group("sep") + REDACTED, text)
+    text = _JWT_RE.sub(REDACTED, text)
+    text = _API_KEY_RE.sub(REDACTED, text)
+    return _URL_CREDENTIALS_RE.sub(
+        lambda m: f"{m.group('scheme')}{m.group('user')}:{REDACTED}@", text
     )
 
-    app_env: AppEnv = "development"
-    log_level: LogLevel = "INFO"
 
-    @field_validator("log_level", mode="before")
-    @classmethod
-    def _normalize_log_level(cls, value: object) -> object:
-        # Accept "debug", "Debug" and "DEBUG".
-        return value.upper() if isinstance(value, str) else value
+def is_sensitive_key(key: str) -> bool:
+    """True if a dictionary key name suggests its value is a secret."""
+    return _SENSITIVE_KEY_RE.search(key) is not None
 
 
-@lru_cache
-def get_settings() -> Settings:
-    """Return the settings, loading them only once per process."""
-    return Settings()
+def redact_data(data: Any) -> Any:
+    """Return a copy of ``data`` with secrets masked.
+
+    Handles dicts, lists, tuples and strings. Values under sensitive keys are always
+    masked. Other value types are returned unchanged. The input is never modified.
+    """
+    if isinstance(data, Mapping):
+        return {
+            key: REDACTED if isinstance(key, str) and is_sensitive_key(key) else redact_data(value)
+            for key, value in data.items()
+        }
+    if isinstance(data, str):
+        return redact_text(data)
+    if isinstance(data, list):
+        return [redact_data(item) for item in data]
+    if isinstance(data, tuple):
+        return tuple(redact_data(item) for item in data)
+    return data
