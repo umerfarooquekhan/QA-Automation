@@ -1,16 +1,19 @@
 """The FastAPI application."""
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, SecretStr
 
 from app import __version__, browser, explorer
 from app.config import get_settings
-from app.redaction import configure_logging, register_secret
+from app.redaction import MIN_SECRET_LENGTH, configure_logging, register_secret
 
 
 class StartRunRequest(BaseModel):
     url: str
+    username: str | None = None
+    password: SecretStr | None = None
     confirm_test_environment: bool
 
 
@@ -22,6 +25,15 @@ def create_app() -> FastAPI:
 
     api = FastAPI(title="QA Agent", version=__version__)
 
+    @api.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # The default 422 answer repeats the submitted values (passwords included). Ours does not.
+        errors = [
+            {"field": ".".join(str(p) for p in e.get("loc", ())), "message": e.get("msg", "invalid")}
+            for e in exc.errors()
+        ]
+        return JSONResponse(status_code=422, content={"detail": errors})
+
     @api.get("/health")
     def health() -> dict[str, str]:
         """Tells you the application is running."""
@@ -29,15 +41,31 @@ def create_app() -> FastAPI:
 
     @api.post("/runs", status_code=201)
     def start_run(request: StartRunRequest) -> dict:
-        """Open a visible browser on the URL."""
+        """Open a visible browser on the URL and, if credentials are given, log in."""
         if not request.confirm_test_environment:
             raise HTTPException(400, "Confirm that this is a test environment you may test.")
         try:
             url = browser.validate_url(request.url)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+
+        credentials = None
+        if request.username or request.password:
+            password = request.password.get_secret_value() if request.password else ""
+            if not request.username or not password:
+                raise HTTPException(400, "Provide both username and password, or neither.")
+            if len(password) < MIN_SECRET_LENGTH:
+                raise HTTPException(
+                    400, f"The password needs at least {MIN_SECRET_LENGTH} characters."
+                )
+            # Register before anything can log them, so they are masked everywhere.
+            register_secret(password)
+            if len(request.username) >= MIN_SECRET_LENGTH:
+                register_secret(request.username)
+            credentials = (request.username, password)
+
         try:
-            state = explorer.start_run(url)
+            state = explorer.start_run(url, credentials)
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
         return state.snapshot()

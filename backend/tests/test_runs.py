@@ -6,6 +6,8 @@ from app.explorer import RunState
 from app.main import app
 from app.redaction import register_secret
 
+client = TestClient(app)
+
 
 def test_validate_url_accepts_http_and_https() -> None:
     assert validate_url(" https://example.com/login ") == "https://example.com/login"
@@ -28,7 +30,37 @@ def test_run_events_never_contain_registered_secrets() -> None:
 
 
 def test_start_run_requires_confirmation() -> None:
-    response = TestClient(app).post(
+    response = client.post(
         "/runs", json={"url": "https://example.com", "confirm_test_environment": False}
     )
     assert response.status_code == 400
+
+
+def test_username_and_password_must_come_together() -> None:
+    response = client.post(
+        "/runs",
+        json={"url": "https://example.com", "username": "alice", "confirm_test_environment": True},
+    )
+    assert response.status_code == 400
+
+
+def test_short_password_is_rejected() -> None:
+    response = client.post(
+        "/runs",
+        json={
+            "url": "https://example.com",
+            "username": "alice",
+            "password": "abc",
+            "confirm_test_environment": True,
+        },
+    )
+    assert response.status_code == 400
+
+
+def test_validation_errors_do_not_echo_input() -> None:
+    response = client.post(
+        "/runs",
+        json={"url": "https://example.com", "password": 98765432, "confirm_test_environment": True},
+    )
+    assert response.status_code == 422
+    assert "98765432" not in response.text
