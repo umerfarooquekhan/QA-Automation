@@ -3,9 +3,9 @@ import logging
 from collections.abc import Iterator
 
 import pytest
-from qa_agent.core.logging_setup import AgentStreamHandler, configure_logging
+from app.redaction import AgentStreamHandler, configure_logging
 
-from qa_agent.core.redaction import register_secret
+from app.redaction import register_secret
 
 logger = logging.getLogger("qa_agent.test_logging")
 

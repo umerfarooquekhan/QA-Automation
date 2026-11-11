@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from qa_agent.core.config import Settings, get_settings
+from app.config import Settings, get_settings
 
 
 def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

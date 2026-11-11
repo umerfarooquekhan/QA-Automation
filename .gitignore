@@ -10,9 +10,8 @@ __pycache__/
 .env.*
 !.env.example
 
-# Runtime data (artifacts, browser profiles, encrypted secrets)
-data/*
-!data/.gitkeep
+# Runtime data: screenshots, browser files, exports
+data/
 
 # Editor and OS
 .vscode/*
@@ -20,5 +19,6 @@ data/*
 Thumbs.db
 .DS_Store
 
-# Node (frontend, later)
+# Node (frontend)
 node_modules/
+dist/

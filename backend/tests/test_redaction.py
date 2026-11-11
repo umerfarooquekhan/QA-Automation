@@ -1,6 +1,6 @@
 import pytest
 
-from qa_agent.core.redaction import (
+from app.redaction import (
     REDACTED,
     is_sensitive_key,
     redact_data,

@@ -2,7 +2,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from qa_agent.core.redaction import clear_registered_secrets
+from app.redaction import clear_registered_secrets
 
 
 @pytest.fixture(autouse=True)

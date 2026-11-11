@@ -2,23 +2,25 @@
 
 from fastapi import FastAPI
 
-from qa_agent import __version__
-from qa_agent.core.config import get_settings
-from qa_agent.core.logging_setup import configure_logging
+from app import __version__
+from app.config import get_settings
+from app.redaction import configure_logging, register_secret
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
+    if settings.deepseek_api_key is not None:
+        register_secret(settings.deepseek_api_key.get_secret_value())
 
-    app = FastAPI(title="QA Agent", version=__version__)
+    api = FastAPI(title="QA Agent", version=__version__)
 
-    @app.get("/health")
+    @api.get("/health")
     def health() -> dict[str, str]:
         """Tells you the application is running."""
         return {"status": "ok", "version": __version__, "env": settings.app_env}
 
-    return app
+    return api
 
 
 app = create_app()

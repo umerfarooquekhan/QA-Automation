@@ -1,16 +1,13 @@
-"""Application settings.
+"""Settings, read from environment variables prefixed with QA_ or from the project's .env file.
 
-Values come from environment variables prefixed with ``QA_`` (for example
-``QA_LOG_LEVEL``) or from a local ``.env`` file. The ``.env`` file is never committed.
-
-Secrets such as passwords do NOT belong in settings. They go through the
-SecretStore, which is added in a later step.
+Secrets are held as SecretStr so they are not printed by accident. Website passwords are
+NOT settings: they are typed into the New Run form and kept in memory for one run only.
 """
 
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AppEnv = Literal["development", "test", "production"]
@@ -30,6 +27,13 @@ class Settings(BaseSettings):
 
     app_env: AppEnv = "development"
     log_level: LogLevel = "INFO"
+
+    # MongoDB (used from the step that saves runs and test cases).
+    mongodb_uri: SecretStr = SecretStr("mongodb://127.0.0.1:27017")
+    mongodb_db: str = Field(default="qa_agent", pattern=r"^[A-Za-z0-9_-]{1,40}$")
+
+    # DeepSeek (used from the step that generates test cases).
+    deepseek_api_key: SecretStr | None = None
 
     @field_validator("log_level", mode="before")
     @classmethod

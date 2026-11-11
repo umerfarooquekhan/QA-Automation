@@ -1,26 +1,24 @@
-"""Redaction of secrets from text and data structures.
+"""Secret masking and safe logging.
 
-Goal: credentials, tokens and similar values must never reach logs, LLM prompts,
-stored observations or exported files. This module is the single place that knows
-how to find and mask them.
+Goal: passwords, OTPs, API keys and tokens must never reach logs or LLM prompts.
 
-Two complementary mechanisms are used:
+Two complementary mechanisms:
 
-1. Exact masking of *registered* secrets. When the application handles a real
-   credential (for example a password supplied by the user) it registers the value
-   here. Any later occurrence of that exact value is masked, however it got there.
-2. Pattern masking for common secret shapes: ``password=...``, authorization and
-   cookie headers, bearer tokens, JWTs, API keys, URL credentials and sensitive
-   query parameters.
+1. Exact masking of *registered* secrets. When the program receives a real secret (a
+   password, an API key) it registers the value here. Any later occurrence of that exact
+   value is masked, however it got there.
+2. Pattern masking for common secret shapes: ``password=...``, authorization and cookie
+   headers, bearer tokens, JWTs, API keys, URL credentials and sensitive query parameters.
 
-Pattern masking is a safety net, not a guarantee. It cannot recognise an arbitrary
-secret it has never seen, so real credentials must also be registered.
+Pattern masking is a safety net, not a guarantee. It cannot recognise a secret it has never
+seen, so real secrets must also be registered.
 """
 
+import logging
 import re
 import threading
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, TextIO
 
 REDACTED = "[REDACTED]"
 MIN_SECRET_LENGTH = 4
@@ -117,3 +115,45 @@ def redact_data(data: Any) -> Any:
     if isinstance(data, tuple):
         return tuple(redact_data(item) for item in data)
     return data
+
+
+# ---------------------------------------------------------------------------
+# Safe logging: every log line passes through redact_text.
+# ---------------------------------------------------------------------------
+
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+class RedactingFilter(logging.Filter):
+    """Masks secrets in the message of every record before it is formatted."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = redact_text(record.getMessage())
+        record.args = ()
+        return True
+
+
+class RedactingFormatter(logging.Formatter):
+    """Masks secrets in the final text, including exception tracebacks."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_text(super().format(record))
+
+
+class AgentStreamHandler(logging.StreamHandler):
+    """Marker subclass so configure_logging can find and replace its own handler."""
+
+
+def configure_logging(level: str = "INFO", stream: TextIO | None = None) -> logging.Handler:
+    """Send all logs through one redacting handler. Safe to call more than once."""
+    root = logging.getLogger()
+    for existing in list(root.handlers):
+        if isinstance(existing, AgentStreamHandler):
+            root.removeHandler(existing)
+
+    handler = AgentStreamHandler(stream)
+    handler.addFilter(RedactingFilter())
+    handler.setFormatter(RedactingFormatter(LOG_FORMAT))
+    root.addHandler(handler)
+    root.setLevel(level.upper())
+    return handler
